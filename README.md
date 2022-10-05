@@ -4,6 +4,9 @@ A 3DS/New 3DS Rom Decryptor and Encrypter
 
 Refactored for python3 and tidied, based on the wonderful efforts of jagiella and the author b1k. For reduction of repeated code, decrypt and encrypt functions have been merged into one function which takes a parameter of cmd which can be either 'encrypt' or 'decrypt'.
 
+##UPDATE
+I have just realised the both the jagiella version that I based this on and my version produce incorrect results for a lot of 3ds games. It is strange how it works perfectly for some but not others. Sadly the original is the only version that I can get to work properly. Unless someone can figure out what my script is doing differently to the original python2 version, I am stuck.
+
 ## Please feel free to further improve this code.
 
 ## Prerequisites
