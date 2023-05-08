@@ -13,13 +13,12 @@ def rol(val, r_bits, max_bits): return \
 
 
 # Setup Keys and IVs
-plain_counter = struct.unpack('>Q', b'\x01\x00\x00\x00\x00\x00\x00\x00')
-exefs_counter = struct.unpack('>Q', b'\x02\x00\x00\x00\x00\x00\x00\x00')
-romfs_counter = struct.unpack('>Q', b'\x03\x00\x00\x00\x00\x00\x00\x00')
+plain_counter = (int.from_bytes(b'\x01\x00\x00\x00\x00\x00\x00\x00', "big"),)
+exefs_counter = (int.from_bytes(b'\x02\x00\x00\x00\x00\x00\x00\x00', "big"),)
+romfs_counter = (int.from_bytes(b'\x03\x00\x00\x00\x00\x00\x00\x00', "big"),)
 # 3DS AES Hardware Constant
 Constant = struct.unpack(
     '>QQ', b'\x1F\xF9\xE9\xAA\xC5\xFE\x04\x08\x02\x45\x91\xDC\x5D\x52\x76\x8A')
-
 # Retail keys
 # KeyX 0x18 (New 3DS 9.3)
 KeyX0x18 = struct.unpack(
@@ -37,6 +36,45 @@ KeyX0x2C = struct.unpack(
 # KeyX0x1B = struct.unpack('>QQ', '\x6C\x8B\x29\x44\xA0\x72\x60\x35\xF9\x41\xDF\xC0\x18\x52\x4F\xB6') # Dev KeyX 0x1B (New 3DS 9.6)
 # KeyX0x25 = struct.unpack('>QQ', '\x81\x90\x7A\x4B\x6F\x1B\x47\x32\x3A\x67\x79\x74\xCE\x4A\xD7\x1B') # Dev KeyX 0x25 (> 7.x)
 # KeyX0x2C = struct.unpack('>QQ', '\x51\x02\x07\x51\x55\x07\xCB\xB1\x8E\x24\x3D\xCB\x85\xE2\x3A\x1D') # Dev KeyX 0x2C (< 6.x)
+
+
+def process_exefs(cmd, f, g, part_off, exefs_off, sectorsize, exefsIV, NormalKey2C, p):
+    f.seek(
+        (part_off[0] + exefs_off[0]) * sectorsize)
+    g.seek(
+        (part_off[0] + exefs_off[0]) * sectorsize)
+    exefsctr2C = Counter.new(
+        128, initial_value=(exefsIV))
+    exefsctrmode2C = AES.new(
+        NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
+    if cmd == "encrypt":
+        g.write(exefsctrmode2C.encrypt(
+            f.read(sectorsize)))
+    elif cmd == "decrypt":
+        g.write(exefsctrmode2C.decrypt(
+            f.read(sectorsize)))
+    print(f"Partition {p:01} ExeFS: {cmd}ing: ExeFS Filename Table")
+
+def setKeys(flags, p, KeyY, Const):
+    if (flags[3] == 0x00):  # Uses Original Key
+        KeyX = (KeyX0x2C[0]<<64) + KeyX0x2C[1]
+        if (p == 0):
+            print("Encryption Method: Key 0x2C")
+    elif (flags[3] == 0x01):  # Uses 7.x Key
+        KeyX = (KeyX0x25[0]<<64) + KeyX0x25[1]
+        if (p == 0):
+            print("Encryption Method: Key 0x25")
+    elif (flags[3] == 0x0A):  # Uses New3DS 9.3 Key
+        KeyX = (KeyX0x18[0]<<64) + KeyX0x18[1]
+        if (p == 0):
+            print("Encryption Method: Key 0x18")
+    elif (flags[3] == 0x0B):  # Uses New3DS 9.6 Key
+        KeyX = (KeyX0x1B[0]<<64) + KeyX0x1B[1]
+        if (p == 0):
+            print("Encryption Method: Key 0x1B")
+    NormalKey = rol(
+        (rol(KeyX, 2, 128) ^ KeyY) + Const, 87, 128)
+    return NormalKey
 
 def process(file, outfile, cmd):
     with open(file, 'rb') as f:
@@ -82,70 +120,55 @@ def process(file, outfile, cmd):
 
                             f.seek(((part_off[0]) * sectorsize) + 0x108)
                             # TitleID is used as IV joined with the content type.
-                            tid = struct.unpack('<Q', f.read(0x8))
+                            tid = (int.from_bytes(f.read(0x8), "little"),)
                             # Get the IV for plain sector (TitleID + Plain Counter)
-                            plain_iv = (tid[::] + plain_counter[::])
+                            plain_iv = (tid + plain_counter)
                             # Get the IV for ExeFS (TitleID + ExeFS Counter)
-                            exefs_iv = (tid[::] + exefs_counter[::])
+                            exefs_iv = (tid + exefs_counter)
                             # Get the IV for RomFS (TitleID + RomFS Counter)
-                            romfs_iv = (tid[::] + romfs_counter[::])
+                            romfs_iv = (tid + romfs_counter)
 
                             # get exheader hash
                             f.seek((part_off[0] * sectorsize) + 0x160)
-                            exhdr_sbhash = str("%016X%016X%016X%016X") % (
-                                struct.unpack('>QQQQ', f.read(0x20)))
+                            exhdr_sbhash = bytearray(f.read(0x20)).hex()
 
                             f.seek((part_off[0] * sectorsize) + 0x180)
                             # get extended header length
-                            exhdr_len = struct.unpack('<L', f.read(0x04))
+                            exhdr_len = (int.from_bytes(f.read(0x04), "little"),)
 
                             f.seek((part_off[0] * sectorsize) + 0x190)
                             # get plain sector offset
-                            plain_off = struct.unpack('<L', f.read(0x04))
+                            plain_off = (int.from_bytes(f.read(0x04), "little"),)
                             # get plain sector length
-                            plain_len = struct.unpack('<L', f.read(0x04))
+                            plain_len = (int.from_bytes(f.read(0x04), "little"),)
 
                             f.seek((part_off[0] * sectorsize) + 0x198)
-                            logo_off = struct.unpack(
-                                '<L', f.read(0x04))  # get logo offset
-                            logo_len = struct.unpack(
-                                '<L', f.read(0x04))  # get logo length
+                            logo_off = (int.from_bytes(f.read(0x04), "little"),)  # get logo offset
+                            logo_len = (int.from_bytes(f.read(0x04), "little"),)  # get logo length
 
                             f.seek((part_off[0] * sectorsize) + 0x1A0)
-                            exefs_off = struct.unpack(
-                                '<L', f.read(0x04))  # get exefs offset
-                            exefs_len = struct.unpack(
-                                '<L', f.read(0x04))  # get exefs length
+                            exefs_off = (int.from_bytes(f.read(0x04), "little"),)  # get exefs offset
+                            exefs_len = (int.from_bytes(f.read(0x04), "little"),)  # get exefs length
 
                             f.seek((part_off[0] * sectorsize) + 0x1B0)
-                            romfs_off = struct.unpack(
-                                '<L', f.read(0x04))  # get romfs offset
-                            romfs_len = struct.unpack(
-                                '<L', f.read(0x04))  # get romfs length
+                            romfs_off = (int.from_bytes(f.read(0x04), "little"),)  # get romfs offset
+                            romfs_len = (int.from_bytes(f.read(0x04), "little"),)  # get romfs length
 
                             # get exefs hash
                             f.seek((part_off[0] * sectorsize) + 0x1C0)
-                            exefs_sbhash = str("%016X%016X%016X%016X") % (
-                                struct.unpack('>QQQQ', f.read(0x20)))
+                            exefs_sbhash = bytearray(f.read(0x20)).hex()
 
                             # get romfs hash
                             f.seek((part_off[0] * sectorsize) + 0x1E0)
-                            romfs_sbhash = str("%016X%016X%016X%016X") % (
-                                struct.unpack('>QQQQ', f.read(0x20)))
+                            romfs_sbhash = bytearray(f.read(0x20)).hex()
 
-                            plainIV = int(str("%016X%016X") %
-                                          (plain_iv[::]), 16)
-                            exefsIV = int(str("%016X%016X") %
-                                          (exefs_iv[::]), 16)
-                            romfsIV = int(str("%016X%016X") %
-                                          (romfs_iv[::]), 16)
-                            KeyY = int(str("%016X%016X") %
-                                       (part_keyy[::]), 16)
-                            Const = int(str("%016X%016X") %
-                                        (Constant[::]), 16)
+                            plainIV = (plain_iv[0]<<64) + plain_iv[1]
+                            exefsIV = KeyX = (exefs_iv[0]<<64) + exefs_iv[1]
+                            romfsIV = KeyX = (romfs_iv[0]<<64) + romfs_iv[1]
+                            KeyY = KeyX = (part_keyy[0]<<64) + part_keyy[1]
+                            Const = KeyX = (Constant[0]<<64) + Constant[1]
 
-                            KeyX2C = int(str("%016X%016X") %
-                                         (KeyX0x2C[::]), 16)
+                            KeyX2C = KeyX = (KeyX0x2C[0]<<64) + KeyX0x2C[1]
                             NormalKey2C = rol(
                                 (rol(KeyX2C, 2, 128) ^ KeyY) + Const, 87, 128)
 
@@ -155,57 +178,10 @@ def process(file, outfile, cmd):
                                 NormalKey2C = 0x00
                             else:
                                 if cmd == "encrypt":
-                                    if (backup_flags[3] == 0x00):  # Uses Original Key
-                                        print("DOES")
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x2C[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x2C")
-                                    elif (backup_flags[3] == 0x01):  # Uses 7.x Key
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x25[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x25")
-                                    # Uses New3DS 9.3 Key
-                                    elif (backup_flags[3] == 0x0A):
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x18[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x18")
-                                    # Uses New3DS 9.6 Key
-                                    elif (backup_flags[3] == 0x0B):
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x1B[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x1B")
-                                    NormalKey = rol(
-                                        (rol(KeyX, 2, 128) ^ KeyY) + Const, 87, 128)
+                                    NormalKey = setKeys(backup_flags, p, KeyY, Const)
                                 elif cmd == "decrypt":
-                                    if (partition_flags[3] == 0x00):  # Uses Original Key
-                                        print("DOES")
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x2C[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x2C")
-                                    elif (partition_flags[3] == 0x01):  # Uses 7.x Key
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x25[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x25")
-                                    # Uses New3DS 9.3 Key
-                                    elif (partition_flags[3] == 0x0A):
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x18[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x18")
-                                    # Uses New3DS 9.6 Key
-                                    elif (partition_flags[3] == 0x0B):
-                                        KeyX = int(str("%016X%016X") %
-                                                   (KeyX0x1B[::]), 16)
-                                        if (p == 0):
-                                            print("Encryption Method: Key 0x1B")
-                                    NormalKey = rol(
-                                        (rol(KeyX, 2, 128) ^ KeyY) + Const, 87, 128)
+                                    NormalKey = setKeys(partition_flags, p, KeyY, Const)
+
 
 
                             if (exhdr_len[0] > 0):
@@ -217,163 +193,78 @@ def process(file, outfile, cmd):
                                     128, initial_value=(plainIV))
                                 exefsctrmode2C = AES.new(
                                     NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
+                                print(f"Partition {p:01} ExeFS: {cmd}ing: ExHeader")
                                 if cmd == "encrypt":
-                                    print(
-                                        "Partition %1d ExeFS: Encrypting: ExHeader" % (p))
                                     g.write(exefsctrmode2C.encrypt(
                                         f.read(exhdr_filelen)))
                                 elif cmd == "decrypt":
-                                    print(
-                                        "Partition %1d ExeFS: Decrypting: ExHeader" % (p))
                                     g.write(exefsctrmode2C.decrypt(
                                         f.read(exhdr_filelen)))
 
                             if (exefs_len[0] > 0):
                                 if cmd == "decrypt":
                                     # decrypt exefs filename table
-                                    f.seek(
-                                        (part_off[0] + exefs_off[0]) * sectorsize)
-                                    g.seek(
-                                        (part_off[0] + exefs_off[0]) * sectorsize)
-                                    exefsctr2C = Counter.new(
-                                        128, initial_value=(exefsIV))
-                                    exefsctrmode2C = AES.new(
-                                        NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
-                                    g.write(exefsctrmode2C.decrypt(
-                                        f.read(sectorsize)))
-                                    print(
-                                        "Partition %1d ExeFS: Decrypting: ExeFS Filename Table" % (p))
+                                    process_exefs(cmd, f, g, part_off, exefs_off, sectorsize, exefsIV, NormalKey2C, p)
 
-                                    if (partition_flags[3] == 0x01 or partition_flags[3] == 0x0A or partition_flags[3] == 0x0B):
-                                        code_filelen = 0
-                                        for j in range(10):  # 10 exefs filename slots
-                                            # get filename, offset and length
+
+                                if (cmd == "decrypt" and (partition_flags[3] == 0x01 or partition_flags[3] == 0x0A or partition_flags[3] == 0x0B)) or \
+                                (cmd == "encrypt" and (backup_flags[3] == 0x01 or backup_flags[3] == 0x0A or backup_flags[3] == 0x0B)):
+                                    code_filelen = 0
+                                    for j in range(10):  # 10 exefs filename slots
+                                        # get filename, offset and length
+                                        f.seek(
+                                            ((part_off[0] + exefs_off[0]) * sectorsize) + j*0x10)
+                                        g.seek(
+                                            ((part_off[0] + exefs_off[0]) * sectorsize) + j*0x10)
+                                        exefs_filename = struct.unpack(
+                                            '<8s', g.read(0x08))
+                                        if exefs_filename[0] == b".code\x00\x00\x00":
+                                            code_fileoff = struct.unpack(
+                                                '<L', g.read(0x04))
+                                            code_filelen = struct.unpack(
+                                                '<L', g.read(0x04))
+                                            datalenM = int(
+                                                (code_filelen[0]) / (1024*1024))
+                                            datalenB = int(
+                                                (code_filelen[0]) % (1024*1024))
+                                            ctroffset = int(
+                                                (code_fileoff[0] + sectorsize) / 0x10)
+                                            exefsctr = Counter.new(
+                                                128, initial_value=(exefsIV + ctroffset))
+                                            exefsctr2C = Counter.new(
+                                                128, initial_value=(exefsIV + ctroffset))
+                                            exefsctrmode = AES.new(
+                                                NormalKey.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr)
+                                            exefsctrmode2C = AES.new(
+                                                NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
                                             f.seek(
-                                                ((part_off[0] + exefs_off[0]) * sectorsize) + j*0x10)
+                                                (((part_off[0] + exefs_off[0]) + 1) * sectorsize) + code_fileoff[0])
                                             g.seek(
-                                                ((part_off[0] + exefs_off[0]) * sectorsize) + j*0x10)
-                                            exefs_filename = struct.unpack(
-                                                '<8s', g.read(0x08))
-                                            print("name:    "+str(exefs_filename[0]))
-                                            if exefs_filename[0] == b".code\x00\x00\x00":
-                                                print("YES")
-                                                code_fileoff = struct.unpack(
-                                                    '<L', g.read(0x04))
-                                                code_filelen = struct.unpack(
-                                                    '<L', g.read(0x04))
-                                                datalenM = int(
-                                                    (code_filelen[0]) / (1024*1024))
-                                                datalenB = int(
-                                                    (code_filelen[0]) % (1024*1024))
-                                                ctroffset = int(
-                                                    (code_fileoff[0] + sectorsize) / 0x10)
-                                                exefsctr = Counter.new(
-                                                    128, initial_value=(exefsIV + ctroffset))
-                                                exefsctr2C = Counter.new(
-                                                    128, initial_value=(exefsIV + ctroffset))
-                                                exefsctrmode = AES.new(
-                                                    NormalKey.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr)
-                                                exefsctrmode2C = AES.new(
-                                                    NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
-                                                f.seek(
-                                                    (((part_off[0] + exefs_off[0]) + 1) * sectorsize) + code_fileoff[0])
-                                                g.seek(
-                                                    (((part_off[0] + exefs_off[0]) + 1) * sectorsize) + code_fileoff[0])
-                                                if (datalenM > 0):
-                                                    if cmd == "encrypt":
-                                                        for i in range(datalenM):
-                                                            g.write(exefsctrmode2C.decrypt(
-                                                                exefsctrmode.encrypt(f.read(1024*1024))))
-                                                    elif cmd == "decrypt":
-                                                        for i in range(datalenM):
-                                                            g.write(exefsctrmode2C.encrypt(
-                                                                exefsctrmode.decrypt(f.read(1024*1024))))
-                                                    print("\rPartition %1d ExeFS: Decrypting: %8s... %4d / %4d mb..." % (
-                                                        p, str(exefs_filename[0]), i, datalenM + 1))
+                                                (((part_off[0] + exefs_off[0]) + 1) * sectorsize) + code_fileoff[0])
+                                            if (datalenM > 0):
+                                                if cmd == "encrypt":
+                                                    for i in range(datalenM):
+                                                        g.write(exefsctrmode2C.decrypt(
+                                                            exefsctrmode.encrypt(f.read(1024*1024))))
+                                                elif cmd == "decrypt":
+                                                    for i in range(datalenM):
+                                                        g.write(exefsctrmode2C.encrypt(
+                                                            exefsctrmode.decrypt(f.read(1024*1024))))
+                                                print(f"\rPartition {p:01} ExeFS: {cmd}ing: {exefs_filename[0].decode('UTF-8'):08}... {i:04} / {datalenM + 1:04} mb...")
 
-                                                    if (datalenB > 0):
-                                                        if cmd == "encrypt":
-                                                            g.write(exefsctrmode2C.decrypt(
-                                                                exefsctrmode.encrypt(f.read(datalenB))))
-                                                        elif cmd == "decrypt":
-                                                            g.write(exefsctrmode2C.encrypt(
-                                                                exefsctrmode.decrypt(f.read(datalenB))))
-                                                        print(f"\rPartition {p:01} ExeFS: {cmd}ing: {str(exefs_filename[0]):08}... {datalenM + 1:04} / {datalenM + 1:04} mb... Done!")
+                                            if (datalenB > 0):
+                                                if cmd == "encrypt":
+                                                    g.write(exefsctrmode2C.decrypt(
+                                                        exefsctrmode.encrypt(f.read(datalenB))))
+                                                elif cmd == "decrypt":
+                                                    g.write(exefsctrmode2C.encrypt(
+                                                        exefsctrmode.decrypt(f.read(datalenB))))
+                                                print(f"\rPartition {p:01} ExeFS: {cmd}ing: {exefs_filename[0].decode('UTF-8'):08}... {datalenM + 1:04} / {datalenM + 1:04} mb... Done!")
+
 
                                 if cmd == "encrypt":
-                                    if (backup_flags[3] == 0x01 or backup_flags[3] == 0x0A or backup_flags[3] == 0x0B):
-                                        code_filelen = 0
-                                        for j in range(10):  # 10 exefs filename slots
-                                            # get filename, offset and length
-                                            f.seek(
-                                                ((part_off[0] + exefs_off[0]) * sectorsize) + j*0x10)
-                                            g.seek(
-                                                ((part_off[0] + exefs_off[0]) * sectorsize) + j*0x10)
-                                            exefs_filename = struct.unpack(
-                                                '<8s', g.read(0x08))
-                                            print("name:    "+str(exefs_filename[0]))
-                                            if exefs_filename[0] == b".code\x00\x00\x00":
-                                                print("YES")
-                                                code_fileoff = struct.unpack(
-                                                    '<L', g.read(0x04))
-                                                code_filelen = struct.unpack(
-                                                    '<L', g.read(0x04))
-                                                datalenM = int(
-                                                    (code_filelen[0]) / (1024*1024))
-                                                datalenB = int(
-                                                    (code_filelen[0]) % (1024*1024))
-                                                ctroffset = int(
-                                                    (code_fileoff[0] + sectorsize) / 0x10)
-                                                exefsctr = Counter.new(
-                                                    128, initial_value=(exefsIV + ctroffset))
-                                                exefsctr2C = Counter.new(
-                                                    128, initial_value=(exefsIV + ctroffset))
-                                                exefsctrmode = AES.new(
-                                                    NormalKey.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr)
-                                                exefsctrmode2C = AES.new(
-                                                    NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
-                                                f.seek(
-                                                    (((part_off[0] + exefs_off[0]) + 1) * sectorsize) + code_fileoff[0])
-                                                g.seek(
-                                                    (((part_off[0] + exefs_off[0]) + 1) * sectorsize) + code_fileoff[0])
-                                                if (datalenM > 0):
-                                                    if cmd == "encrypt":
-                                                        for i in range(datalenM):
-                                                            g.write(exefsctrmode2C.decrypt(
-                                                                exefsctrmode.encrypt(f.read(1024*1024))))
-                                                    elif cmd == "decrypt":
-                                                        for i in range(datalenM):
-                                                            g.write(exefsctrmode2C.encrypt(
-                                                                exefsctrmode.decrypt(f.read(1024*1024))))
-                                                    print("\rPartition %1d ExeFS: Decrypting: %8s... %4d / %4d mb..." % (
-                                                        p, str(exefs_filename[0]), i, datalenM + 1))
-
-                                                    if (datalenB > 0):
-                                                        if cmd == "encrypt":
-                                                            g.write(exefsctrmode2C.decrypt(
-                                                                exefsctrmode.encrypt(f.read(datalenB))))
-                                                        elif cmd == "decrypt":
-                                                            g.write(exefsctrmode2C.encrypt(
-                                                                exefsctrmode.decrypt(f.read(datalenB))))
-                                                        print(f"\rPartition {p:01} ExeFS: {cmd}ing: {str(exefs_filename[0]):08}... {datalenM + 1:04} / {datalenM + 1:04} mb... Done!")
-
                                     # encrypt exefs filename table
-                                    f.seek(
-                                        (part_off[0] + exefs_off[0]) * sectorsize)
-                                    g.seek(
-                                        (part_off[0] + exefs_off[0]) * sectorsize)
-                                    exefsctr2C = Counter.new(
-                                        128, initial_value=(exefsIV))
-                                    exefsctrmode2C = AES.new(
-                                        NormalKey2C.to_bytes(16, 'big'), AES.MODE_CTR, counter=exefsctr2C)
-                                    if cmd == "encrypt":
-                                        g.write(exefsctrmode2C.encrypt(
-                                            f.read(sectorsize)))
-                                    elif cmd == "decrypt":
-                                        g.write(exefsctrmode2C.decrypt(
-                                            f.read(sectorsize)))
-                                    print(f"Partition {p:01} ExeFS: {cmd}ing: ExeFS Filename Table")
-
+                                    process_exefs(cmd, f, g, part_off, exefs_off, sectorsize, exefsIV, NormalKey2C, p)
 
                                 # encrypt exefs
                                 exefsSizeM = int(
@@ -391,6 +282,7 @@ def process(file, outfile, cmd):
                                     (part_off[0] + exefs_off[0] + 1) * sectorsize)
 
                                 if (exefsSizeM > 0):
+                                    print("yes")
                                     for i in range(exefsSizeM):
                                         if cmd == "encrypt":
                                             g.write(exefsctrmode2C.encrypt(
@@ -399,13 +291,13 @@ def process(file, outfile, cmd):
                                             g.write(exefsctrmode2C.decrypt(
                                                 f.read(1024*1024)))
                                         print(f"\rPartition {p:01} ExeFS: {cmd}ing: {i:04} / {exefsSizeM + 1:04} mb", end=' ')
-                                    if (exefsSizeB > 0):
-                                        if cmd == "encrypt":
-                                            g.write(exefsctrmode2C.encrypt(
-                                                f.read(exefsSizeB)))
-                                        elif cmd == "decrypt":
-                                            g.write(exefsctrmode2C.decrypt(
-                                                f.read(exefsSizeB)))
+                                if (exefsSizeB > 0):
+                                    if cmd == "encrypt":
+                                        g.write(exefsctrmode2C.encrypt(
+                                            f.read(exefsSizeB)))
+                                    elif cmd == "decrypt":
+                                        g.write(exefsctrmode2C.decrypt(
+                                            f.read(exefsSizeB)))
                                     print(f"\rPartition {p:01} ExeFS: {cmd}ing: {exefsSizeM + 1:04} / {exefsSizeM + 1:04} mb... Done")
                             else:
                                 print(f"Partition {p:01} ExeFS: No Data... Skipping...")
@@ -421,8 +313,7 @@ def process(file, outfile, cmd):
 
                                 if cmd == "encrypt":
                                     if (p > 0):  # RomFS for partitions 1 and up always use Key0x2C
-                                        KeyX = int(str("%016X%016X") %
-                                                    (KeyX0x2C[::]), 16)
+                                        KeyX = KeyX = (KeyX0x2C[0]<<64) + KeyX0x2C[1]
                                         NormalKey = rol(
                                             (rol(KeyX, 2, 128) ^ KeyY) + Const, 87, 128)
 
@@ -443,7 +334,7 @@ def process(file, outfile, cmd):
                                         elif cmd == "decrypt":
                                             g.write(romfsctrmode.decrypt(
                                                 f.read(romfsBlockSize*(1024*1024))))
-                                        print(f"\rPartition {p:01} RomFS: {cmd}ing: {i*romfsBlockSize:04} / {romfsSizeTotalMb:04} mb")
+                                        print(f"\rPartition {p:01} RomFS: {cmd}ing: {i*romfsBlockSize:04} / {romfsSizeTotalMb:04} mb", end='\r')
 
                                 if (romfsSizeB > 0):
                                     if cmd == "encrypt":
@@ -453,7 +344,7 @@ def process(file, outfile, cmd):
                                         g.write(romfsctrmode.decrypt(
                                             f.read(romfsSizeB)))
 
-                                print(f"\rPartition {p:01} RomFS: {cmd}ing: {romfsSizeTotalMb:04} / {romfsSizeTotalMb:04} mb... Done")
+                                print(f"\rPartition {p:01} RomFS: {cmd}ing: {romfsSizeTotalMb:04} / {romfsSizeTotalMb:04} mb... Done", end='\r')
 
                             else:
                                 print(f"Partition {p:01} RomFS: No Data... Skipping...")
